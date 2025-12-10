@@ -1,0 +1,5 @@
+Flask==3.0.0
+google-generativeai==0.3.2
+python-dotenv==1.0.0
+Flask-Limiter==3.5.0
+gunicorn==21.2.0
