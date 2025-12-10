@@ -6,162 +6,119 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from datetime import datetime
 from dotenv import load_dotenv
-from functools import lru_cache
-import hashlib
 
 app = Flask(__name__)
 
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_AIP_KEY"))
 
-limiter = Limiter(
-    key_func=get_remote_address,
-    app=app,
-    default_limits=["30 per hour"]
-)
+limiter = Limiter(key_func=get_remote_address,
+                  app=app,
+                  default_limits=["30 per hour"])
 
-# Global cache
 documents = None
 doc_embeddings = None
-response_cache = {}  # Simple in-memory cache
-CACHE_SIZE = 100
 
 def load_documents():
-    """Load documents and embeddings once at startup"""
+    #Load Precomputed Embeddings
     global documents, doc_embeddings
     if documents is None:
-        print("📚 Loading documents...")
+        print("Loading documents...")
         with open("yardstick_docs.json") as f:
             documents = json.load(f)
         try:
             with open("yardstick_embeddings.json") as f:
                 doc_embeddings = json.load(f)
-            print(f"✅ Loaded {len(documents)} documents with embeddings")
+            print(f"Loaded {len(documents)} documents with embeddings")
         except FileNotFoundError:
-            print("⚠️ No embeddings file found, using keyword search")
+            print("No embeddings file found, using keyword search")
             doc_embeddings = None
-
-# Load at startup, not on every request
-load_documents()
-
-def cosine_similarity(a, b):
-    """Optimized cosine similarity"""
+        
+def consine_similarity(a,b):
+    #cosine similarity
     import math
-    dot_product = sum(x * y for x, y in zip(a, b))
-    magnitude_a = math.sqrt(sum(x * x for x in a))
-    magnitude_b = math.sqrt(sum(x * x for x in b))
+    dot_product = sum(x*y for x,y in zip(a,b))
+    magnitude_a = math.sqrt(sum(x*x for x in a))
+    magnitude_b = math.sqrt(sum(x*x for x in b))
     if magnitude_a == 0 or magnitude_b == 0:
         return 0
-    return dot_product / (magnitude_a * magnitude_b)
+    return dot_product/(magnitude_a*magnitude_b)
 
-@lru_cache(maxsize=128)  # Cache embeddings for repeated queries
 def get_embedding(text):
-    """Get embedding with caching"""
+    #google api
     try:
         result = genai.embed_content(
             model="models/text-embedding-004",
             content=text,
             task_type="retrieval_query"
         )
-        return tuple(result['embedding'])  # Convert to tuple for caching
+        return result['embedding']
     except Exception as e:
-        print(f"❌ Embedding error: {e}")
+        print("Embedding error: {e}")
         return None
-
-def semantic_search(query, k=5):
-    """Search using embeddings with caching"""
-    query_emb = get_embedding(query)  # Cached
     
+def semantic_search(query,k=5):
+    #SEARCH using embeddings
+    load_documents()
+    query_emb = get_embedding(query)
     if query_emb is None or doc_embeddings is None:
-        return keyword_search(query, k)
-    
-    similarities = []
-    for i, doc_emb in enumerate(doc_embeddings):
-        sim = cosine_similarity(query_emb, doc_emb)
-        similarities.append((sim, i))
-    
-    similarities.sort(reverse=True)
-    return [documents[i] for _, i in similarities[:k]]
+        return keyword_search(query,k)
+    similarity = []
+    for i,doc_emb in enumerate(doc_embeddings):
+        sim = consine_similarity(query_emb,doc_emb)
+        similarity.append((sim,1))
+        
+    similarity.sort(reverse=True)
+    return [documents[i] for _, i in similarity[:k]]
 
 def keyword_search(query, k=10):
-    """Fallback keyword search"""
+    load_documents()
     keywords = query.lower().split()
     scored = []
     
-    for i, doc in enumerate(documents):
+    for i,doc in enumerate(documents):
         doc_lower = doc.lower()
         score = sum(doc_lower.count(kw) for kw in keywords)
         if query.lower() in doc_lower:
             score += 100
         if score > 0:
-            scored.append((score, i))
+            scored.append((score,i))
     
     scored.sort(reverse=True)
     return [documents[i] for _, i in scored[:k]]
 
-def get_cache_key(query):
-    """Generate cache key from query"""
-    return hashlib.md5(query.lower().strip().encode()).hexdigest()
 
 def generate_answer(query):
-    """Generate answer with response caching"""
-    
-    # Check cache first
-    cache_key = get_cache_key(query)
-    if cache_key in response_cache:
-        print("💾 Cache hit!")
-        return response_cache[cache_key]
-    
+    """Generate answer using semantic search + Gemini"""
     # Use semantic search if embeddings available, else keyword
     if doc_embeddings:
-        relevant_docs = semantic_search(query, k=3)  # Reduced from 5 to 3
+        relevant_docs = semantic_search(query, k=5)
     else:
-        relevant_docs = keyword_search(query, k=5)  # Reduced from 10 to 5
+        relevant_docs = keyword_search(query, k=10)
     
     if not relevant_docs:
-        return "I don't have information about that. Please contact us at contact@yardstick.live or +917891053001 for specific questions."
+        return "I don't have information about that. Please ask about doctors, facilities, or hospital services."
     
-    context = '\n\n'.join(relevant_docs[:3])  # Limit context size
+    context = '\n\n'.join(relevant_docs)
     
-    # Shortened prompt to reduce tokens
-    prompt = f"""You are Yardstick AI assistant: helpful, professional, and concise (max 3 sentences). 
-    Be polite, positive, and customer-focused.
+    prompt = f"""Yardstick AI assistant: helpful, professional, concise.
 
-    Use ONLY the context below to answer. 
-    If the context does not include the answer:
-    - Do NOT say "provided context does not contain information".
-    - Instead, briefly say you don't have that specific detail,
-    then invite the user to a free strategy call at contact@yardstick.live or +917891053001.
+Answer from context (2-3 sentences, benefit-focused). If missing info: acknowledge + offer free strategy call. Pricing: "Depends on needs - what's your use case?" Technical: redirect to team. Contact: contact@yardstick.live | +917891053001
 
-    Keep answers natural and conversational, not robotic.
+Never fabricate. Stay positive.
+{context}
 
-    Context:
-    {context}
+User QUESTION: {query}
 
-    Q: {query}
-    A:"""    
+YOUR ANSWER:"""
+    
     try:
-        model = genai.GenerativeModel('gemini-2.5-flash-lite')  # Faster model
-        response = model.generate_content(
-            prompt,
-            generation_config={
-                'max_output_tokens': 150,  # Limit response length
-                'temperature': 0.8,  # More deterministic
-            }
-        )
-        answer = response.text.strip()
-        
-        # Cache the response
-        if len(response_cache) >= CACHE_SIZE:
-            # Remove oldest entry (simple FIFO)
-            response_cache.pop(next(iter(response_cache)))
-        response_cache[cache_key] = answer
-        
-        return answer
-        
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        response = model.generate_content(prompt)
+        return response.text.strip()
     except Exception as e:
         print(f"❌ Gemini error: {e}")
-        return "I'm having trouble right now. Please try again or contact us at contact@yardstick.live"
+        return "I'm having trouble processing your request. Please try again in a moment."
 
 @app.route('/health')
 def health():
@@ -169,7 +126,6 @@ def health():
         'status': 'alive',
         'docs_loaded': documents is not None,
         'embeddings_loaded': doc_embeddings is not None,
-        'cache_size': len(response_cache),
         'timestamp': datetime.now().isoformat()
     }), 200
 
@@ -179,9 +135,8 @@ def ping():
 
 @app.route('/')
 def home():
-    # Your HTML content here (unchanged)
     html_content = '''
-    <!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -783,6 +738,8 @@ def home():
 
 </body>
 </html>
+
+
     '''
     return render_template_string(html_content)
 
@@ -798,9 +755,6 @@ def chat():
         if not question:
             return jsonify({'error': 'No question provided'}), 400
         
-        if len(question) > 500:  # Limit query length
-            return jsonify({'error': 'Question too long (max 500 chars)'}), 400
-        
         print(f"📥 Question: {question}")
         answer = generate_answer(question)
         print(f"📤 Answer: {answer[:100]}...")
@@ -813,13 +767,7 @@ def chat():
         traceback.print_exc()
         return jsonify({'error': 'Server error. Please try again.'}), 500
 
-# Clear cache endpoint (optional, for admin use)
-@app.route('/admin/clear-cache', methods=['POST'])
-def clear_cache():
-    response_cache.clear()
-    get_embedding.cache_clear()
-    return jsonify({'message': 'Cache cleared'}), 200
-
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
