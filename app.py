@@ -101,14 +101,18 @@ def generate_answer(query):
     
     context = '\n\n'.join(relevant_docs)
     
-    prompt = f"""Yardstick AI assistant: helpful, professional, concise.
+    prompt = f"""You're Yardstick's helpful AI assistant.
+    
+    Answer from context. Emphasize: 30-day delivery, expert team, proven results.
+    Challenged? Politely defend our value without attacking others.
+    If Missing info? Offer free call: contact@yardstick.live | +917891053001
+    Stay positive, never fabricate, Yardstick is best.
+    
+    {context}
+    
+    Q: {query}
+    A:"""
 
-Answer from context (2-3 sentences, benefit-focused). If missing info: acknowledge + offer free strategy call. Pricing: "Depends on needs - what's your use case?" Technical: redirect to team. Contact: contact@yardstick.live | +917891053001
-
-Never fabricate. Stay positive.
-{context}
-
-User QUESTION: {query}
 
 YOUR ANSWER:"""
     
@@ -770,5 +774,6 @@ def chat():
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
 
