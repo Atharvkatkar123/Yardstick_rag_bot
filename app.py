@@ -6,120 +6,162 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from datetime import datetime
 from dotenv import load_dotenv
+from functools import lru_cache
+import hashlib
 
 app = Flask(__name__)
 
 load_dotenv()
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-limiter = Limiter(key_func=get_remote_address,
-                  app=app,
-                  default_limits=["30 per hour"])
+# Verify API key
+api_key = os.getenv("GEMINI_API_KEY")
+if not api_key:
+    raise ValueError("❌ GEMINI_API_KEY not found in environment variables!")
+
+genai.configure(api_key=api_key)
+print(f"✅ Gemini configured with API key: {api_key[:10]}...")
+
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    default_limits=["30 per hour"]
+)
 
 documents = None
 doc_embeddings = None
+response_cache = {}
+CACHE_SIZE = 100
 
 def load_documents():
-    #Load Precomputed Embeddings
+    """Load documents and embeddings once at startup"""
     global documents, doc_embeddings
     if documents is None:
-        print("Loading documents...")
+        print("📚 Loading documents...")
         with open("yardstick_docs.json") as f:
             documents = json.load(f)
         try:
             with open("yardstick_embeddings.json") as f:
                 doc_embeddings = json.load(f)
-            print(f"Loaded {len(documents)} documents with embeddings")
+            print(f"✅ Loaded {len(documents)} documents with embeddings")
         except FileNotFoundError:
-            print("No embeddings file found, using keyword search")
+            print("⚠️ No embeddings file found, using keyword search")
             doc_embeddings = None
-        
-def consine_similarity(a,b):
-    #cosine similarity
+
+# Load at startup
+load_documents()
+
+def cosine_similarity(a, b):
+    """Calculate cosine similarity between two vectors"""
     import math
-    dot_product = sum(x*y for x,y in zip(a,b))
-    magnitude_a = math.sqrt(sum(x*x for x in a))
-    magnitude_b = math.sqrt(sum(x*x for x in b))
+    dot_product = sum(x * y for x, y in zip(a, b))
+    magnitude_a = math.sqrt(sum(x * x for x in a))
+    magnitude_b = math.sqrt(sum(x * x for x in b))
     if magnitude_a == 0 or magnitude_b == 0:
         return 0
-    return dot_product/(magnitude_a*magnitude_b)
+    return dot_product / (magnitude_a * magnitude_b)
 
+@lru_cache(maxsize=128)
 def get_embedding(text):
-    #google api
+    """Get embedding with caching"""
     try:
         result = genai.embed_content(
             model="models/text-embedding-004",
             content=text,
             task_type="retrieval_query"
         )
-        return result['embedding']
+        return tuple(result['embedding'])
     except Exception as e:
-        print("Embedding error: {e}")
+        print(f"❌ Embedding error: {e}")
         return None
-    
-def semantic_search(query,k=5):
-    #SEARCH using embeddings
-    load_documents()
-    query_emb = get_embedding(query)
-    if query_emb is None or doc_embeddings is None:
-        return keyword_search(query,k)
-    similarity = []
-    for i,doc_emb in enumerate(doc_embeddings):
-        sim = consine_similarity(query_emb,doc_emb)
-        similarity.append((sim,1))
-        
-    similarity.sort(reverse=True)
-    return [documents[i] for _, i in similarity[:k]]
 
-def keyword_search(query, k=10):
-    load_documents()
+def semantic_search(query, k=3):
+    """Search using semantic embeddings"""
+    query_emb = get_embedding(query)
+    
+    if query_emb is None or doc_embeddings is None:
+        return keyword_search(query, k)
+    
+    similarities = []
+    for i, doc_emb in enumerate(doc_embeddings):
+        sim = cosine_similarity(query_emb, doc_emb)
+        similarities.append((sim, i))
+    
+    similarities.sort(reverse=True)
+    return [documents[i] for _, i in similarities[:k]]
+
+def keyword_search(query, k=5):
+    """Fallback keyword-based search"""
     keywords = query.lower().split()
     scored = []
     
-    for i,doc in enumerate(documents):
+    for i, doc in enumerate(documents):
         doc_lower = doc.lower()
         score = sum(doc_lower.count(kw) for kw in keywords)
         if query.lower() in doc_lower:
             score += 100
         if score > 0:
-            scored.append((score,i))
+            scored.append((score, i))
     
     scored.sort(reverse=True)
     return [documents[i] for _, i in scored[:k]]
 
+def get_cache_key(query):
+    """Generate cache key from query"""
+    return hashlib.md5(query.lower().strip().encode()).hexdigest()
 
 def generate_answer(query):
-    """Generate answer using semantic search + Gemini"""
-    # Use semantic search if embeddings available, else keyword
+    """Generate answer with caching"""
+    
+    # Check cache
+    cache_key = get_cache_key(query)
+    if cache_key in response_cache:
+        print("💾 Cache hit!")
+        return response_cache[cache_key]
+    
+    # Search for relevant documents
     if doc_embeddings:
-        relevant_docs = semantic_search(query, k=5)
+        relevant_docs = semantic_search(query, k=3)
     else:
-        relevant_docs = keyword_search(query, k=10)
+        relevant_docs = keyword_search(query, k=5)
     
     if not relevant_docs:
-        return "I don't have information about that. Please ask about doctors, facilities, or hospital services."
+        return "I'd love to help! Could you ask about Yardstick's AI services, pricing, or how we can help your business? Or contact us directly: contact@yardstick.live | +917891053001"
     
-    context = '\n\n'.join(relevant_docs)
+    context = '\n\n'.join(relevant_docs[:3])
     
     prompt = f"""You're Yardstick's helpful AI assistant (max 3 sentences).
-    
-    Answer from context. Emphasize: 30-day delivery, expert team, proven results.
-    Challenged? Politely defend our value without attacking others.
-    If Missing info? Offer free call: contact@yardstick.live | +917891053001
-    Stay positive, never fabricate, Yardstick is best.
-    
-    {context}
-    
-    User QUESTION: {query}
-YOUR ANSWER:"""
+
+Answer from context. Emphasize: 30-day delivery, expert team, proven results.
+Challenged? Politely defend our value without attacking others.
+Missing info? Offer free call: contact@yardstick.live | +917891053001
+Stay positive, never fabricate.
+
+{context}
+
+Q: {query}
+A:"""
     
     try:
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        response = model.generate_content(prompt)
-        return response.text.strip()
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        response = model.generate_content(
+            prompt,
+            generation_config={
+                'max_output_tokens': 150,
+                'temperature': 0.7,
+            }
+        )
+        answer = response.text.strip()
+        
+        # Cache response
+        if len(response_cache) >= CACHE_SIZE:
+            response_cache.pop(next(iter(response_cache)))
+        response_cache[cache_key] = answer
+        
+        return answer
+        
     except Exception as e:
         print(f"❌ Gemini error: {e}")
-        return "I'm having trouble processing your request. Please try again in a moment."
+        return "I'm having trouble right now. Please contact our team directly at contact@yardstick.live or +917891053001"
 
 @app.route('/health')
 def health():
@@ -127,6 +169,7 @@ def health():
         'status': 'alive',
         'docs_loaded': documents is not None,
         'embeddings_loaded': doc_embeddings is not None,
+        'cache_size': len(response_cache),
         'timestamp': datetime.now().isoformat()
     }), 200
 
@@ -171,7 +214,6 @@ def home():
             flex-direction: column;
         }
 
-        /* Header - Fixed at top */
         .chat-header {
             background: var(--bar-color);
             color: var(--text-white);
@@ -209,7 +251,6 @@ def home():
             color: var(--text-white);
         }
 
-        /* Messages Area - Centered with max-width */
         .chat-messages {
             flex: 1;
             overflow-y: auto;
@@ -277,7 +318,7 @@ def home():
         }
 
         .message.bot .message-icon {
-            background: linear-gradient(135deg, var(--pink-muted) 0%, var(--purple-mid) 100%);
+            background: #000000;
             padding: 5px;
         }
 
@@ -290,15 +331,6 @@ def home():
             height: 100%;
             object-fit: contain;
             border-radius: 8px;
-        }
-
-
-        .message.bot .message-icon {
-            background: linear-gradient(135deg,#000000 0%, #000000 100%);
-        }
-
-        .message.user .message-icon {
-            background: rgba(88, 0, 99, 0.6);
         }
 
         .message-bubble {
@@ -319,12 +351,11 @@ def home():
         }
 
         .message.user .message-bubble {
-            background: linear-gradient(135deg, #000000 0%, #000000 100%);
+            background: #000000;
             color: var(--text-white);
             border-radius: 18px 18px 4px 18px;
         }
 
-        /* Typing Indicator */
         .typing-indicator {
             display: none;
             align-items: center;
@@ -382,7 +413,6 @@ def home():
             }
         }
 
-        /* Input Area - Fixed at bottom */
         .chat-input-area {
             position: fixed;
             bottom: 0;
@@ -455,7 +485,6 @@ def home():
             cursor: not-allowed;
         }
 
-        /* Scrollbar */
         .chat-messages::-webkit-scrollbar {
             width: 8px;
         }
@@ -469,7 +498,6 @@ def home():
             border-radius: 10px;
         }
 
-        /* Link styling */
         .message-bubble a {
             color: var(--pink-bright);
             text-decoration: underline;
@@ -479,7 +507,6 @@ def home():
             color: var(--pink-muted);
         }
 
-        /* Responsive Design */
         @media (max-width: 768px) {
             .chat-header {
                 padding: 12px 15px;
@@ -509,7 +536,6 @@ def home():
             .message-icon {
                 width: 30px;
                 height: 30px;
-                font-size: 1rem;
             }
 
             .chat-input-area {
@@ -540,51 +566,9 @@ def home():
                 padding: 10px 15px;
             }
         }
-
-        @media (max-width: 300px) {
-            .logo-container {
-                width: 30px;
-                height: 30px;
-            }
-
-            .header-text h1 {
-                font-size: 0.9rem;
-            }
-
-            .message-icon {
-                width: 25px;
-                height: 25px;
-            }
-
-            .message-bubble {
-                font-size: 0.85rem;
-                padding: 10px 14px;
-            }
-
-            #sendBtn {
-                padding: 8px 12px;
-                font-size: 0.85rem;
-            }
-        }
-
-        @media (max-height: 500px) {
-            .chat-header {
-                padding: 8px 15px;
-            }
-
-            .chat-messages {
-                padding: 55px 15px 90px 15px;
-                min-height: 300px;
-            }
-
-            .chat-input-area {
-                padding: 10px 15px;
-            }
-        }
     </style>
 </head>
 <body>
-    <!-- Fixed Header -->
     <div class="chat-header">
         <div class="logo-container">
             <img src="static/yardstick.png" alt="Yardstick Logo">
@@ -594,10 +578,8 @@ def home():
         </div>
     </div>
 
-    <!-- Full Screen Messages Area -->
     <div class="chat-messages" id="chatMessages">
         <div class="messages-container" id="messagesContainer">
-            <!-- Welcome Message -->
             <div class="message bot">
                 <div class="message-content">
                     <div class="message-icon"><img src="static/yardstick.png" alt="Yardstick Logo"></div>
@@ -608,7 +590,6 @@ def home():
             </div>
         </div>
 
-        <!-- Typing Indicator -->
         <div class="typing-indicator" id="typingIndicator">
             <div class="typing-indicator-icon"></div>
             <div class="typing-dots">
@@ -619,7 +600,6 @@ def home():
         </div>
     </div>
 
-    <!-- Fixed Bottom Input Area -->
     <div class="chat-input-area">
         <div class="chat-input-wrapper">
             <div class="chat-input-container">
@@ -641,7 +621,6 @@ def home():
         const sendBtn = document.getElementById('sendBtn');
         const typingIndicator = document.getElementById('typingIndicator');
 
-        // Add message to chat
         function addMessage(text, isUser = false) {
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${isUser ? 'user' : 'bot'}`;
@@ -663,7 +642,6 @@ def home():
             const bubble = document.createElement('div');
             bubble.className = 'message-bubble';
             
-            // Convert URLs to clickable links
             const urlRegex = /(https?:\/\/[^\s]+)/g;
             const linkedText = text.replace(urlRegex, (url) => {
                 return `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`;
@@ -679,7 +657,6 @@ def home():
             chatMessages.scrollTop = chatMessages.scrollHeight;
         }
 
-        // Show/hide typing indicator
         function showTyping(show) {
             typingIndicator.classList.toggle('active', show);
             if (show) {
@@ -687,21 +664,16 @@ def home():
             }
         }
 
-        // Send message
         async function sendMessage() {
             const message = userInput.value.trim();
             if (!message) return;
 
-            // Add user message
             addMessage(message, true);
             userInput.value = '';
             sendBtn.disabled = true;
-
-            // Show typing
             showTyping(true);
 
             try {
-                // Call your backend API here
                 const response = await fetch('/api/chat', {
                     method: 'POST',
                     headers: {
@@ -711,8 +683,6 @@ def home():
                 });
 
                 const data = await response.json();
-
-                // Hide typing and show response
                 showTyping(false);
                 addMessage(data.answer, false);
 
@@ -725,7 +695,6 @@ def home():
             userInput.focus();
         }
 
-        // Event listeners
         sendBtn.addEventListener('click', sendMessage);
         userInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') {
@@ -733,14 +702,11 @@ def home():
             }
         });
 
-        // Focus input on load
         userInput.focus();
     </script>
 
 </body>
 </html>
-
-
     '''
     return render_template_string(html_content)
 
@@ -756,6 +722,9 @@ def chat():
         if not question:
             return jsonify({'error': 'No question provided'}), 400
         
+        if len(question) > 500:
+            return jsonify({'error': 'Question too long (max 500 chars)'}), 400
+        
         print(f"📥 Question: {question}")
         answer = generate_answer(question)
         print(f"📤 Answer: {answer[:100]}...")
@@ -770,9 +739,5 @@ def chat():
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
+    print(f"🚀 Starting server on port {port}...")
     app.run(host='0.0.0.0', port=port, debug=False)
-
-
-
-
-
