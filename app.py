@@ -6,162 +6,119 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from datetime import datetime
 from dotenv import load_dotenv
-from functools import lru_cache
-import hashlib
 
 app = Flask(__name__)
 
 load_dotenv()
+genai.configure(api_key=os.getenv("GEMINI_AIP_KEY"))
 
-# Verify API key
-api_key = os.getenv("GEMINI_API_KEY")
-if not api_key:
-    raise ValueError("❌ GEMINI_API_KEY not found in environment variables!")
-
-genai.configure(api_key=api_key)
-print(f"✅ Gemini configured with API key: {api_key[:10]}...")
-
-limiter = Limiter(
-    key_func=get_remote_address,
-    app=app,
-    default_limits=["30 per hour"]
-)
+limiter = Limiter(key_func=get_remote_address,
+                  app=app,
+                  default_limits=["30 per hour"])
 
 documents = None
 doc_embeddings = None
-response_cache = {}
-CACHE_SIZE = 100
 
 def load_documents():
-    """Load documents and embeddings once at startup"""
+    #Load Precomputed Embeddings
     global documents, doc_embeddings
     if documents is None:
-        print("📚 Loading documents...")
+        print("Loading documents...")
         with open("yardstick_docs.json") as f:
             documents = json.load(f)
         try:
             with open("yardstick_embeddings.json") as f:
                 doc_embeddings = json.load(f)
-            print(f"✅ Loaded {len(documents)} documents with embeddings")
+            print(f"Loaded {len(documents)} documents with embeddings")
         except FileNotFoundError:
-            print("⚠️ No embeddings file found, using keyword search")
+            print("No embeddings file found, using keyword search")
             doc_embeddings = None
-
-# Load at startup
-load_documents()
-
-def cosine_similarity(a, b):
-    """Calculate cosine similarity between two vectors"""
+        
+def consine_similarity(a,b):
+    #cosine similarity
     import math
-    dot_product = sum(x * y for x, y in zip(a, b))
-    magnitude_a = math.sqrt(sum(x * x for x in a))
-    magnitude_b = math.sqrt(sum(x * x for x in b))
+    dot_product = sum(x*y for x,y in zip(a,b))
+    magnitude_a = math.sqrt(sum(x*x for x in a))
+    magnitude_b = math.sqrt(sum(x*x for x in b))
     if magnitude_a == 0 or magnitude_b == 0:
         return 0
-    return dot_product / (magnitude_a * magnitude_b)
+    return dot_product/(magnitude_a*magnitude_b)
 
-@lru_cache(maxsize=128)
 def get_embedding(text):
-    """Get embedding with caching"""
+    #google api
     try:
         result = genai.embed_content(
             model="models/text-embedding-004",
             content=text,
             task_type="retrieval_query"
         )
-        return tuple(result['embedding'])
+        return result['embedding']
     except Exception as e:
-        print(f"❌ Embedding error: {e}")
+        print("Embedding error: {e}")
         return None
-
-def semantic_search(query, k=3):
-    """Search using semantic embeddings"""
+    
+def semantic_search(query,k=5):
+    #SEARCH using embeddings
+    load_documents()
     query_emb = get_embedding(query)
-    
     if query_emb is None or doc_embeddings is None:
-        return keyword_search(query, k)
-    
-    similarities = []
-    for i, doc_emb in enumerate(doc_embeddings):
-        sim = cosine_similarity(query_emb, doc_emb)
-        similarities.append((sim, i))
-    
-    similarities.sort(reverse=True)
-    return [documents[i] for _, i in similarities[:k]]
+        return keyword_search(query,k)
+    similarity = []
+    for i,doc_emb in enumerate(doc_embeddings):
+        sim = consine_similarity(query_emb,doc_emb)
+        similarity.append((sim,1))
+        
+    similarity.sort(reverse=True)
+    return [documents[i] for _, i in similarity[:k]]
 
-def keyword_search(query, k=5):
-    """Fallback keyword-based search"""
+def keyword_search(query, k=10):
+    load_documents()
     keywords = query.lower().split()
     scored = []
     
-    for i, doc in enumerate(documents):
+    for i,doc in enumerate(documents):
         doc_lower = doc.lower()
         score = sum(doc_lower.count(kw) for kw in keywords)
         if query.lower() in doc_lower:
             score += 100
         if score > 0:
-            scored.append((score, i))
+            scored.append((score,i))
     
     scored.sort(reverse=True)
     return [documents[i] for _, i in scored[:k]]
 
-def get_cache_key(query):
-    """Generate cache key from query"""
-    return hashlib.md5(query.lower().strip().encode()).hexdigest()
 
 def generate_answer(query):
-    """Generate answer with caching"""
-    
-    # Check cache
-    cache_key = get_cache_key(query)
-    if cache_key in response_cache:
-        print("💾 Cache hit!")
-        return response_cache[cache_key]
-    
-    # Search for relevant documents
+    """Generate answer using semantic search + Gemini"""
+    # Use semantic search if embeddings available, else keyword
     if doc_embeddings:
-        relevant_docs = semantic_search(query, k=3)
+        relevant_docs = semantic_search(query, k=5)
     else:
-        relevant_docs = keyword_search(query, k=5)
+        relevant_docs = keyword_search(query, k=10)
     
     if not relevant_docs:
-        return "I'd love to help! Could you ask about Yardstick's AI services, pricing, or how we can help your business? Or contact us directly: contact@yardstick.live | +917891053001"
+        return "I don't have information about that. Please ask about doctors, facilities, or hospital services."
     
-    context = '\n\n'.join(relevant_docs[:3])
+    context = '\n\n'.join(relevant_docs)
     
-    prompt = f"""You're Yardstick's helpful AI assistant (max 3 sentences).
+    prompt = f"""Yardstick AI assistant: helpful, professional, concise.
 
-Answer from context. Emphasize: 30-day delivery, expert team, proven results.
-Challenged? Politely defend our value without attacking others.
-Missing info? Offer free call: contact@yardstick.live | +917891053001
-Stay positive, never fabricate.
+Answer from context (2-3 sentences, benefit-focused). If missing info: acknowledge + offer free strategy call. Pricing: "Depends on needs - what's your use case?" Technical: redirect to team. Contact: contact@yardstick.live | +917891053001
 
+Never fabricate. Stay positive.
 {context}
 
-Q: {query}
-A:"""
+User QUESTION: {query}
+
+YOUR ANSWER:"""
     
     try:
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
-        response = model.generate_content(
-            prompt,
-            generation_config={
-                'max_output_tokens': 150,
-                'temperature': 0.7,
-            }
-        )
-        answer = response.text.strip()
-        
-        # Cache response
-        if len(response_cache) >= CACHE_SIZE:
-            response_cache.pop(next(iter(response_cache)))
-        response_cache[cache_key] = answer
-        
-        return answer
-        
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        response = model.generate_content(prompt)
+        return response.text.strip()
     except Exception as e:
         print(f"❌ Gemini error: {e}")
-        return "I'm having trouble right now. Please contact our team directly at contact@yardstick.live or +917891053001"
+        return "I'm having trouble processing your request. Please try again in a moment."
 
 @app.route('/health')
 def health():
@@ -169,7 +126,6 @@ def health():
         'status': 'alive',
         'docs_loaded': documents is not None,
         'embeddings_loaded': doc_embeddings is not None,
-        'cache_size': len(response_cache),
         'timestamp': datetime.now().isoformat()
     }), 200
 
@@ -214,6 +170,108 @@ def home():
             flex-direction: column;
         }
 
+        /* Splash Screen */
+        #splashScreen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: gradient(#000000 0%, var(--bg-dark) 60%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+            animation: fadeOut 1.5s ease 3.5s forwards;
+        }
+
+        @keyframes fadeOut {
+            to {
+                opacity: 0;
+                visibility: hidden;
+            }
+        }
+
+        .splash-logo {
+            width: 150px;
+            height: 150px;
+            margin-bottom: 30px;
+            opacity: 0;
+            transform: scale(0.3);
+            animation: logoPopIn 0.8s cubic-bezier(0.68, -0.55, 0.265, 1.55) 0.3s forwards;
+        }
+
+        @keyframes logoPopIn {
+            0% {
+                opacity: 0;
+                transform: scale(0.3) rotate(0deg);
+            }
+            100% {
+                opacity: 1;
+                transform: scale(1) rotate(0deg);
+            }
+        }
+
+        .splash-text {
+            font-size: 3rem;
+            font-weight: 350;
+            color: var(--text-white);
+            overflow: hidden;
+            position: relative;
+        }
+
+        .splash-text span {
+            display: inline-block;
+            opacity: 0;
+            transform: translateX(-100px);
+            animation: slideInText 0.3s ease forwards;
+        }
+
+        .splash-text span:nth-child(1) { animation-delay: 1s; }
+        .splash-text span:nth-child(2) { animation-delay: 1.1s; }
+        .splash-text span:nth-child(3) { animation-delay: 1.2s; }
+        .splash-text span:nth-child(4) { animation-delay: 1.3s; }
+        .splash-text span:nth-child(5) { animation-delay: 1.4s; }
+        .splash-text span:nth-child(6) { animation-delay: 1.5s; }
+        .splash-text span:nth-child(7) { animation-delay: 1.6s; }
+        .splash-text span:nth-child(8) { animation-delay: 1.7s; }
+        .splash-text span:nth-child(9) { animation-delay: 1.8s; }
+
+        @keyframes slideInText {
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+
+        .splash-tagline {
+            margin-top: 15px;
+            font-size: 1rem;
+            color: var(--text-gray);
+            opacity: 0;
+            animation: fadeIn 0.5s ease 2s forwards;
+        }
+
+        @keyframes fadeIn {
+            to {
+                opacity: 1;
+            }
+        }
+
+        /* Hide main content initially */
+        #mainApp {
+            opacity: 0;
+            animation: showApp 0.5s ease 2.8s forwards;
+        }
+
+        @keyframes showApp {
+            to {
+                opacity: 1;
+            }
+        }
+
+        /* Rest of your existing styles */
         .chat-header {
             background: var(--bar-color);
             color: var(--text-white);
@@ -508,6 +566,15 @@ def home():
         }
 
         @media (max-width: 768px) {
+            .splash-logo {
+                width: 120px;
+                height: 120px;
+            }
+
+            .splash-text {
+                font-size: 2.5rem;
+            }
+
             .chat-header {
                 padding: 12px 15px;
             }
@@ -549,6 +616,15 @@ def home():
         }
 
         @media (max-width: 480px) {
+            .splash-logo {
+                width: 100px;
+                height: 100px;
+            }
+
+            .splash-text {
+                font-size: 3rem;
+            }
+
             .header-text h1 {
                 font-size: 1rem;
             }
@@ -569,47 +645,59 @@ def home():
     </style>
 </head>
 <body>
-    <div class="chat-header">
-        <div class="logo-container">
-            <img src="static/yardstick.png" alt="Yardstick Logo">
+    <!-- Splash Screen -->
+    <div id="splashScreen">
+        <img src="static/yardstick.png" alt="Yardstick Logo" class="splash-logo">
+        <div class="splash-text">
+            <span>Y</span><span>a</span><span>r</span><span>d</span><span>s</span><span>t</span><span>i</span><span>c</span><span>k</span>
         </div>
-        <div class="header-text">
-            <h1>Yardstick</h1>
-        </div>
+        <div class="splash-tagline">RAG bot system</div>
     </div>
 
-    <div class="chat-messages" id="chatMessages">
-        <div class="messages-container" id="messagesContainer">
-            <div class="message bot">
-                <div class="message-content">
-                    <div class="message-icon"><img src="static/yardstick.png" alt="Yardstick Logo"></div>
-                    <div class="message-bubble">
-                        Hello! Welcome to Yardstick. How can I assist you today?
+    <!-- Main App -->
+    <div id="mainApp">
+        <div class="chat-header">
+            <div class="logo-container">
+                <img src="static/yardstick.png" alt="Yardstick Logo">
+            </div>
+            <div class="header-text">
+                <h1>Yardstick</h1>
+            </div>
+        </div>
+
+        <div class="chat-messages" id="chatMessages">
+            <div class="messages-container" id="messagesContainer">
+                <div class="message bot">
+                    <div class="message-content">
+                        <div class="message-icon"><img src="static/yardstick.png" alt="Yardstick Logo"></div>
+                        <div class="message-bubble">
+                            Hello! Welcome to Yardstick. How can I assist you today?
+                        </div>
                     </div>
+                </div>
+            </div>
+
+            <div class="typing-indicator" id="typingIndicator">
+                <div class="typing-indicator-icon"></div>
+                <div class="typing-dots">
+                    <div class="typing-dot"></div>
+                    <div class="typing-dot"></div>
+                    <div class="typing-dot"></div>
                 </div>
             </div>
         </div>
 
-        <div class="typing-indicator" id="typingIndicator">
-            <div class="typing-indicator-icon"></div>
-            <div class="typing-dots">
-                <div class="typing-dot"></div>
-                <div class="typing-dot"></div>
-                <div class="typing-dot"></div>
-            </div>
-        </div>
-    </div>
-
-    <div class="chat-input-area">
-        <div class="chat-input-wrapper">
-            <div class="chat-input-container">
-                <input 
-                    type="text" 
-                    id="userInput" 
-                    placeholder="Ask anything about Yardstick's AI services"
-                    autocomplete="off"
-                >
-                <button id="sendBtn">Send</button>
+        <div class="chat-input-area">
+            <div class="chat-input-wrapper">
+                <div class="chat-input-container">
+                    <input 
+                        type="text" 
+                        id="userInput" 
+                        placeholder="Ask anything about Yardstick's AI services"
+                        autocomplete="off"
+                    >
+                    <button id="sendBtn">Send</button>
+                </div>
             </div>
         </div>
     </div>
@@ -620,6 +708,11 @@ def home():
         const userInput = document.getElementById('userInput');
         const sendBtn = document.getElementById('sendBtn');
         const typingIndicator = document.getElementById('typingIndicator');
+
+        // Remove splash screen after animation
+        setTimeout(() => {
+            document.getElementById('splashScreen').style.display = 'none';
+        }, 3000);
 
         function addMessage(text, isUser = false) {
             const messageDiv = document.createElement('div');
@@ -702,7 +795,10 @@ def home():
             }
         });
 
-        userInput.focus();
+        // Focus input after splash screen
+        setTimeout(() => {
+            userInput.focus();
+        }, 5000);
     </script>
 
 </body>
@@ -722,9 +818,6 @@ def chat():
         if not question:
             return jsonify({'error': 'No question provided'}), 400
         
-        if len(question) > 500:
-            return jsonify({'error': 'Question too long (max 500 chars)'}), 400
-        
         print(f"📥 Question: {question}")
         answer = generate_answer(question)
         print(f"📤 Answer: {answer[:100]}...")
@@ -739,5 +832,5 @@ def chat():
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    print(f"🚀 Starting server on port {port}...")
     app.run(host='0.0.0.0', port=port, debug=False)
+
