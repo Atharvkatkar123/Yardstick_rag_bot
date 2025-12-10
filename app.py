@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 app = Flask(__name__)
 
 load_dotenv()
-genai.configure(api_key=os.getenv("GEMINI_AIP_KEY"))
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 limiter = Limiter(key_func=get_remote_address,
                   app=app,
@@ -833,4 +833,5 @@ def chat():
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
