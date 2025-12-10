@@ -101,7 +101,7 @@ def generate_answer(query):
     
     context = '\n\n'.join(relevant_docs)
     
-    prompt = f"""You're Yardstick's helpful AI assistant.
+    prompt = f"""You're Yardstick's helpful AI assistant (max 3 sentences).
     
     Answer from context. Emphasize: 30-day delivery, expert team, proven results.
     Challenged? Politely defend our value without attacking others.
@@ -771,6 +771,7 @@ def chat():
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
 
 
